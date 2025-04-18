@@ -1,0 +1,1323 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import requests # Ensure requests is imported
+import logging
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, pairwise_distances # Added for memory similarity later
+from qiskit import QuantumCircuit, Aer, execute
+from qiskit.circuit import Parameter
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.model_selection import cross_val_score
+
+
+# Data Processing Module
+class DataProcessor:
+    """Handles cleaning, transformation, analysis, and dimensionality reduction."""
+    def clean_data(self, data):
+        """Remove missing values from dataset"""
+        # Consider more sophisticated cleaning (imputation, outlier detection) for production
+        return data.dropna()
+
+    def transform_data(self, data):
+        """Standardize data using z-score normalization:
+        X_norm = (X - μ) / σ
+        where μ is the mean and σ is the standard deviation
+        """
+        # Ensure data is numeric for transformation
+        numeric_data = data.select_dtypes(include=np.number)
+        if numeric_data.empty:
+             print("Warning: No numeric data found for transformation.")
+             return data # Return original if no numeric data
+        # Avoid division by zero for columns with zero standard deviation
+        std_dev = numeric_data.std()
+        std_dev[std_dev == 0] = 1.0 # Replace 0 std dev with 1 to avoid NaN/inf
+        return (numeric_data - numeric_data.mean()) / std_dev
+
+    def analyze_data(self, data):
+        """Generate statistical summary of the data"""
+        return data.describe()
+
+    def dimensionality_reduction(self, data, n_components=2, method="pca"):
+        """Reduce dimensionality using PCA or t-SNE
+
+        PCA algorithm:
+        1. Standardize the data
+        2. Calculate covariance matrix: Σ = (1/(n-1))X^T X
+        3. Calculate eigenvectors and eigenvalues of Σ
+        4. Select top n_components eigenvectors
+        5. Project data: Z = X · V, where V contains eigenvectors
+        """
+        # Ensure data is numeric
+        numeric_data = data.select_dtypes(include=np.number)
+        if numeric_data.shape[1] < n_components:
+             print(f"Warning: Number of features ({numeric_data.shape[1]}) is less than n_components ({n_components}). Skipping reduction.")
+             return numeric_data # Or handle as appropriate
+
+        if method == "pca":
+            reducer = PCA(n_components=n_components)
+        elif method == "tsne":
+            reducer = TSNE(n_components=n_components)
+        else:
+            raise ValueError("Unsupported dimensionality reduction method. Choose 'pca' or 'tsne'.")
+
+        return reducer.fit_transform(numeric_data)
+
+
+# Machine Learning Module
+class MLEngine:
+    """Handles training and evaluation of classical machine learning models."""
+    def train_model(self, X, y, model_type="random_forest"):
+        """Train machine learning model with specified algorithm
+
+        Random Forest algorithm:
+        1. Create multiple decision trees on bootstrapped samples
+        2. At each split, consider random subset of features
+        3. Aggregate predictions through majority voting (classification)
+           or averaging (regression)
+        """
+        # Ensure X and y are numpy arrays
+        X_np = X.values if isinstance(X, pd.DataFrame) else np.array(X)
+        y_np = y.values if isinstance(y, pd.Series) else np.array(y)
+
+        if X_np.shape[0] != y_np.shape[0]:
+            raise ValueError("Input features (X) and target (y) must have the same number of samples.")
+        if X_np.shape[0] < 2:
+             print("Warning: Not enough samples to train.")
+             return None, 0.0
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_np, y_np, test_size=0.2, random_state=42, stratify=y_np if len(np.unique(y_np)) > 1 else None
+        )
+
+        if model_type == "random_forest":
+            # Basic hyperparameter tuning could be added here
+            model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            accuracy = accuracy_score(y_test, y_pred)
+            return model, accuracy
+        elif model_type == "neural_network":
+            print("Neural network training requires a separate PyTorch training loop implementation.")
+            # Define model structure (requires input size dynamically)
+            input_dim = X_np.shape[1]
+            output_dim = len(np.unique(y_np))
+            model = nn.Sequential(
+                nn.Linear(input_dim, 64),
+                nn.ReLU(),
+                nn.Linear(64, 32),
+                nn.ReLU(),
+                nn.Linear(32, output_dim),
+                # Add LogSoftmax for classification tasks if using NLLLoss
+                # nn.LogSoftmax(dim=1)
+            )
+            # TODO: Implement PyTorch training loop (optimizer, loss, epochs, batches)
+            print("NN Model defined but not trained.")
+            return model, 0.0 # Return untrained model and 0 accuracy
+        else:
+            raise ValueError("Unsupported model type. Choose 'random_forest' or 'neural_network'.")
+
+
+    def cross_validate(self, X, y, k=5, model_type="random_forest"):
+        """Perform k-fold cross validation
+
+        Algorithm:
+        1. Split data into k equal folds
+        2. For each fold i:
+           a. Train on all folds except i
+           b. Validate on fold i
+        3. Average performance metrics
+        """
+        X_np = X.values if isinstance(X, pd.DataFrame) else np.array(X)
+        y_np = y.values if isinstance(y, pd.Series) else np.array(y)
+
+        if model_type == "random_forest":
+             model = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42)
+        # Add other model types if needed
+        # elif model_type == "svm":
+        #     from sklearn.svm import SVC
+        #     model = SVC()
+        else:
+             # For NN, cross-validation would require training loop within each fold
+             print(f"Cross-validation for model type '{model_type}' not implemented here.")
+             return 0.0, 0.0
+
+        try:
+            scores = cross_val_score(model, X_np, y_np, cv=k, scoring='accuracy')
+            return scores.mean(), scores.std()
+        except Exception as e:
+            print(f"Cross-validation failed: {e}")
+            # Handle cases like insufficient samples per class for stratification
+            return 0.0, 0.0
+
+
+# API Integration Module
+class APIClient:
+    """Handles communication with external REST APIs."""
+    def fetch_data(self, url, params=None, headers=None):
+        """Fetch data from REST API endpoint using GET"""
+        try:
+            response = requests.get(url, params=params, headers=headers, timeout=10) # Added timeout
+            response.raise_for_status() # Raises HTTPError for bad responses (4xx or 5xx)
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            # Log the error appropriately
+            print(f"Error fetching data from {url}: {e}")
+            # raise Exception(f"Failed to fetch data: {e}") from e # Option to re-raise
+            return None # Or return None/empty dict to indicate failure
+
+    def post_data(self, url, data, headers=None):
+        """Post data to REST API endpoint using POST"""
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=10) # Added timeout
+            response.raise_for_status()
+            # Check if response has JSON content before decoding
+            if response.headers.get('Content-Type') == 'application/json':
+                return response.json()
+            else:
+                return response.text # Return text if not JSON
+        except requests.exceptions.RequestException as e:
+            print(f"Error posting data to {url}: {e}")
+            # raise Exception(f"Failed to post data: {e}") from e # Option to re-raise
+            return None
+
+    def batch_process(self, url, data_batch, method="post", headers=None):
+        """Process multiple API requests in batch (sequentially)"""
+        # Consider async/threading for performance improvements
+        results = []
+        for item in data_batch:
+            if method == "post":
+                result = self.post_data(url, item, headers=headers)
+                results.append(result)
+            elif method == "get":
+                 # Assuming item is a dictionary of parameters for GET
+                result = self.fetch_data(url, params=item, headers=headers)
+                results.append(result)
+            else:
+                 print(f"Unsupported batch method: {method}")
+                 results.append(None)
+        return results
+
+
+# Quantum Neural Network Module
+class QuantumNN:
+    """Simulates a Quantum Neural Network layer using Qiskit."""
+    def __init__(self, num_qubits):
+        """Initialize quantum neural network with specified qubits
+
+        Quantum Circuit Model:
+        |ψ⟩ = U(θ)|0⟩ where U(θ) is a parameterized quantum circuit
+        """
+        if num_qubits <= 0:
+            raise ValueError("Number of qubits must be positive.")
+        self.num_qubits = num_qubits
+        self.circuit = QuantumCircuit(num_qubits)
+        # Define parameters for the variational circuit
+        self.params = [
+            Parameter(f"θ{i}") for i in range(num_qubits * 3) # Increased parameters for flexibility
+        ]
+        self.error_correction_enabled = False
+        self.noise_resilience = 0.1 # Default noise factor for simulation
+
+        # --- Build a more structured variational circuit (example: Hardware Efficient Ansatz) ---
+        param_idx = 0
+        # Layer 1: Single-qubit rotations
+        for i in range(num_qubits):
+            self.circuit.ry(self.params[param_idx], i); param_idx += 1
+            self.circuit.rz(self.params[param_idx], i); param_idx += 1
+
+        self.circuit.barrier() # Separate layers visually
+
+        # Layer 2: Entanglement + Single-qubit rotations
+        for i in range(num_qubits - 1):
+             self.circuit.cx(i, i + 1) # Linear entanglement
+        # Optional: Add more entanglement (e.g., circular)
+        # if num_qubits > 2:
+        #     self.circuit.cx(num_qubits - 1, 0)
+
+        for i in range(num_qubits):
+            self.circuit.ry(self.params[param_idx], i); param_idx += 1
+            # self.circuit.rz(self.params[param_idx], i); param_idx += 1 # Can add more rotations
+
+        self.circuit.measure_all() # Measure all qubits
+
+    def run(self, theta_values):
+        """Execute quantum circuit with given parameters on a simulator.
+
+        Measurement probability for basis state |x⟩:
+        p(x) = |⟨x|U(θ)|0⟩|²
+        """
+        if len(theta_values) != len(self.params):
+             # Handle parameter mismatch: either raise error or adapt carefully
+             # Option 1: Raise Error (Safer)
+             raise ValueError(f"Incorrect number of parameters. Expected {len(self.params)}, got {len(theta_values)}")
+             # Option 2: Pad or truncate (Use with caution)
+             # target_len = len(self.params)
+             # theta_values = (list(theta_values) * (target_len // len(theta_values) + 1))[:target_len]
+             # print(f"Warning: Parameter length mismatch. Adapting {len(theta_values)} params to {target_len}.")
+
+
+        backend = Aer.get_backend("qasm_simulator") # Use simulator
+
+        # Parameter binding
+        parameter_map = {param: val for param, val in zip(self.params, theta_values)}
+        try:
+            bound_circuit = self.circuit.bind_parameters(parameter_map)
+        except Exception as e:
+             print(f"Error binding parameters: {e}")
+             print(f"Circuit parameters: {[p.name for p in self.circuit.parameters]}")
+             print(f"Provided map keys: {[p.name for p in parameter_map.keys()]}")
+             raise
+
+        # Simulation settings
+        shots = 1024 # Standard number of shots
+
+        # --- Simulated Noise Model (Optional) ---
+        noise_model = None
+        if self.error_correction_enabled: # Use flag to simulate noise instead of correction
+            from qiskit.providers.aer.noise import NoiseModel, depolarizing_error
+            print(f"Simulating noise with resilience factor: {self.noise_resilience}")
+            # Example noise: depolarizing error on single-qubit gates
+            error = depolarizing_error(self.noise_resilience, 1)
+            noise_model = NoiseModel()
+            noise_model.add_all_qubit_quantum_error(error, ['u1', 'u2', 'u3', 'ry', 'rz']) # Apply to specific gates
+            shots = 4096 # Increase shots for noisy simulation
+
+        # Execute the circuit
+        job = execute(bound_circuit, backend, shots=shots, noise_model=noise_model)
+        result = job.result()
+        counts = result.get_counts(bound_circuit)
+
+        # --- Simulated Error Mitigation (Placeholder) ---
+        # Actual QEM is complex (e.g., ZNE, Clifford Data Regression).
+        # This is just a conceptual placeholder if needed, but noise simulation is often preferred.
+        # if self.error_correction_enabled:
+        #    print("Applying simplified error mitigation (conceptual)...")
+        #    # Example: Simple smoothing (redistribute small portion of counts)
+        #    # This is NOT rigorous QEM.
+        #    mitigated_counts = counts.copy()
+        #    total_counts = sum(counts.values())
+        #    for bitstring, count in counts.items():
+        #        # Logic to adjust counts based on neighbors or other heuristics
+        #        pass # Replace with actual mitigation logic if developed
+        #    return mitigated_counts
+
+        return counts
+
+    def quantum_expectation(self, observable_matrix, theta_values):
+        """Calculate quantum expectation value of an observable matrix.
+
+        ⟨O⟩ = Tr(ρO) = ∑ₓ p(x)⟨x|O|x⟩
+        where ρ is the density matrix |ψ(θ)⟩⟨ψ(θ)| and p(x) are measurement probabilities.
+        """
+        counts = self.run(theta_values)
+        total_shots = sum(counts.values())
+        expectation = 0
+
+        # Ensure observable matrix is numpy array
+        O = np.array(observable_matrix)
+        if O.shape != (2**self.num_qubits, 2**self.num_qubits):
+             raise ValueError("Observable matrix dimension mismatch with number of qubits.")
+
+        for bitstring, count in counts.items():
+            # Convert bitstring to integer index
+            # Qiskit bitstrings are typically reversed, check convention
+            # Assuming standard order (e.g., '01' -> 1)
+            index = int(bitstring, 2)
+
+            # Get the diagonal element corresponding to the basis state |x⟩
+            # ⟨x|O|x⟩ is the diagonal element O[index, index]
+            observable_diag_element = O[index, index]
+
+            # Add contribution to expectation value
+            expectation += (count / total_shots) * observable_diag_element
+
+        return np.real(expectation) # Expectation value should be real
+
+    def enable_error_correction(self, enable=True, resilience=0.1):
+        """Enable or disable *simulated* noise for circuit execution."""
+        print(f"Setting simulated noise model: {enable} (Resilience: {resilience})")
+        self.error_correction_enabled = enable # Flag now controls noise simulation
+        self.noise_resilience = max(0.0, min(1.0, resilience)) # Clamp resilience factor
+
+    def variational_circuit(self, input_data, theta_values):
+        """Apply variational quantum circuit to input data (Quantum Feature Map).
+
+        Encodes classical data into a quantum state, processes it with a
+        parameterized circuit, and measures to produce quantum-inspired features.
+
+        Args:
+            input_data: Classical input vector (numpy array).
+            theta_values: Trainable parameters for the variational circuit.
+
+        Returns:
+            Output vector (quantum features) derived from measurement probabilities.
+        """
+        # --- 1. Data Encoding ---
+        # Choose an encoding strategy (e.g., angle encoding, amplitude encoding)
+        # Example: Angle encoding - encode features into rotation angles
+        encoding_circuit = QuantumCircuit(self.num_qubits, name="DataEncoding")
+        num_features = len(input_data)
+        if num_features == 0:
+            raise ValueError("Input data cannot be empty.")
+
+        for i in range(self.num_qubits):
+            # Map input features to angles (e.g., scale to [0, 2pi])
+            # Ensure input_data values are suitable for direct use or scale them
+            angle_y = input_data[i % num_features] * np.pi # Example mapping
+            angle_z = input_data[(i + 1) % num_features] * np.pi # Example mapping
+            encoding_circuit.ry(angle_y, i)
+            encoding_circuit.rz(angle_z, i)
+
+        # --- 2. Variational Ansatz ---
+        # Use the main circuit defined in __init__ as the variational part
+        # Ensure the number of theta_values matches the parameters in self.circuit
+        if len(theta_values) != len(self.params):
+            raise ValueError(f"Parameter count mismatch for variational circuit. Expected {len(self.params)}, got {len(theta_values)}")
+
+        parameter_map = {param: val for param, val in zip(self.params, theta_values)}
+        variational_ansatz = self.circuit.bind_parameters(parameter_map)
+
+        # --- 3. Combine and Execute ---
+        full_circuit = encoding_circuit.compose(variational_ansatz)
+        # Note: Measurement is already part of self.circuit
+
+        backend = Aer.get_backend("qasm_simulator")
+        shots = 1024
+        job = execute(full_circuit, backend, shots=shots)
+        result = job.result()
+        counts = result.get_counts(full_circuit)
+
+        # --- 4. Post-processing (Feature Extraction) ---
+        # Convert measurement counts into a feature vector.
+        # Option 1: Probability vector for all 2^N states
+        output_dim = 2**self.num_qubits
+        output_vector = np.zeros(output_dim)
+        for bitstring, count in counts.items():
+             index = int(bitstring, 2) # Assuming standard bitstring order
+             output_vector[index] = count / total_shots
+
+        # Option 2: Expectation values of Pauli operators (e.g., <Z_i>, <X_i>)
+        # Requires defining Pauli strings and calculating expectations. More complex.
+        # Example for <Z_0>:
+        # exp_z0 = 0
+        # for bitstring, count in counts.items():
+        #     measurement = 1 if bitstring[-1] == '0' else -1 # Z measurement on qubit 0
+        #     exp_z0 += (count / total_shots) * measurement
+        # output_vector = [exp_z0, ...] # Collect expectations
+
+        return output_vector
+
+
+# Fractal Neural Network Module (More accurately: Fractal Feature Processor)
+class FractalNN:
+    """Generates features based on fractal mathematics (Mandelbrot, Julia, etc.)."""
+    def __init__(self, iterations=50):
+        """Initialize fractal processor."""
+        if iterations <= 0:
+             raise ValueError("Number of iterations must be positive.")
+        self.iterations = iterations
+        self.escape_radius = 2.0
+        self.bailout_value = self.escape_radius**2 # Optimization
+
+        # Dictionary of fractal formulas (z, c -> next_z)
+        self.fractal_formulas = {
+            "mandelbrot": lambda z, c: z**2 + c,
+            "burning_ship": lambda z, c: (abs(z.real) + 1j * abs(z.imag))**2 + c,
+            "tricorn": lambda z, c: z.conjugate()**2 + c,
+            # Add more formulas as needed
+            # "julia_cubical": lambda z, c: z**3 + c, # Example
+        }
+        self.default_formula = "mandelbrot"
+
+    def _generate_fractal_value(self, z_init, c, formula_type=None):
+        """Calculates escape time or orbit trap value for a single point."""
+        formula_key = formula_type or self.default_formula
+        formula = self.fractal_formulas.get(formula_key)
+        if not formula:
+            raise ValueError(f"Unknown fractal formula type: {formula_key}")
+
+        z = z_init
+        for i in range(self.iterations):
+            if abs(z) > self.escape_radius:
+                # Smooth iteration count for continuous coloring/features
+                log_zn = np.log(abs(z))
+                nu = np.log(log_zn / np.log(self.escape_radius)) / np.log(2.0)
+                smooth_iter = i + 1 - nu
+                return smooth_iter / self.iterations # Normalize escape time
+
+            z = formula(z, c)
+
+        # If it doesn't escape, return a value indicating it's in the set
+        # Could use orbit traps, distance estimation, or simply 1.0
+        return 1.0 # Max value for points within the set after max iterations
+
+    def process_data_mandelbrot(self, data, formula_type=None):
+        """Process data using Mandelbrot-like fractal transformation.
+           Maps data points to 'c' values in the complex plane.
+        """
+        # Ensure data is a flat numpy array
+        data_flat = np.array(data).flatten()
+        if data_flat.size == 0: return np.array([])
+
+        # Scale data to a suitable region for 'c', e.g., [-2, 1] + [-1.5, 1.5]j
+        # Normalize data first to [0, 1]
+        min_val, max_val = np.min(data_flat), np.max(data_flat)
+        if max_val == min_val: # Avoid division by zero if data is constant
+             norm_data = np.zeros_like(data_flat)
+        else:
+             norm_data = (data_flat - min_val) / (max_val - min_val)
+
+        real_part = -2.0 + 3.0 * norm_data # Scale real part to [-2, 1]
+        # Use a second feature or random for imaginary part if data is 1D
+        # For simplicity, let's use shifted normalized data for imaginary part
+        imag_part = -1.5 + 3.0 * np.roll(norm_data, 1) # Scale imag part to [-1.5, 1.5]
+
+        complex_params = real_part + 1j * imag_part
+
+        # Calculate fractal value for each point (z starts at 0 for Mandelbrot)
+        processed_data = np.array(
+            [self._generate_fractal_value(0+0j, c, formula_type) for c in complex_params]
+        )
+        return processed_data
+
+    def process_data_julia(self, data, c_julia=-0.7 + 0.27j, formula_type=None):
+        """Process data using Julia-like fractal transformation.
+           Maps data points to initial 'z' values in the complex plane.
+        """
+        # Ensure data is a flat numpy array
+        data_flat = np.array(data).flatten()
+        if data_flat.size == 0: return np.array([])
+
+        # Scale data to a suitable region for 'z', e.g., [-1.5, 1.5] + [-1.5, 1.5]j
+        min_val, max_val = np.min(data_flat), np.max(data_flat)
+        if max_val == min_val:
+             norm_data = np.zeros_like(data_flat)
+        else:
+             norm_data = (data_flat - min_val) / (max_val - min_val)
+
+        real_part = -1.5 + 3.0 * norm_data # Scale real part to [-1.5, 1.5]
+        imag_part = -1.5 + 3.0 * np.roll(norm_data, 1) # Scale imag part to [-1.5, 1.5]
+
+        complex_inits = real_part + 1j * imag_part
+
+        # Calculate fractal value for each point using the fixed Julia parameter 'c'
+        processed_data = np.array(
+            [self._generate_fractal_value(z_init, c_julia, formula_type) for z_init in complex_inits]
+        )
+        return processed_data
+
+    # --- Placeholder for Multifractal/IFS ---
+    # These require more complex implementations (e.g., box counting, affine transforms)
+    def multifractal_transform(self, data, q_values=None):
+         """Placeholder for multifractal analysis."""
+         print("Multifractal transform not fully implemented.")
+         # Requires proper box counting or wavelet transform modulus maxima (WTMM)
+         # Return simple statistics as placeholder features
+         data_flat = np.array(data).flatten()
+         if data_flat.size == 0: return np.array([0.0] * (len(q_values) if q_values else 5))
+         return np.array([np.mean(data_flat), np.std(data_flat), np.min(data_flat), np.max(data_flat), 0.0])[:len(q_values) if q_values else 5]
+
+    def ifs_transform(self, data, num_functions=3):
+         """Placeholder for Iterated Function System transform."""
+         print("IFS transform not fully implemented.")
+         # Requires defining and applying affine transformations iteratively
+         # Return normalized data as placeholder
+         data_flat = np.array(data).flatten()
+         if data_flat.size == 0: return np.array([])
+         min_val, max_val = np.min(data_flat), np.max(data_flat)
+         if max_val == min_val: return np.zeros_like(data_flat)
+         return (data_flat - min_val) / (max_val - min_val)
+
+
+# Logging and Monitoring Module
+class Logger:
+    """Handles logging for the framework."""
+    def __init__(self, log_file="system.log", level=logging.INFO):
+        # Avoid adding multiple handlers if logger is instantiated multiple times
+        self.logger = logging.getLogger("HyperIntelligentFrameworkLogger")
+        if not self.logger.handlers: # Check if handlers already exist
+            self.logger.setLevel(level)
+            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+            # File Handler
+            fh = logging.FileHandler(log_file)
+            fh.setLevel(level)
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
+
+            # Console Handler (optional, for visible output)
+            ch = logging.StreamHandler()
+            ch.setLevel(level)
+            ch.setFormatter(formatter)
+            self.logger.addHandler(ch)
+
+    def log_info(self, message):
+        self.logger.info(message)
+
+    def log_warning(self, message):
+        self.logger.warning(message)
+
+    def log_error(self, message, exc_info=False): # Added exc_info option
+        self.logger.error(message, exc_info=exc_info)
+
+    def log_debug(self, message):
+        self.logger.debug(message)
+
+    def log_metrics(self, metrics_dict):
+        """Log performance metrics"""
+        for metric_name, value in metrics_dict.items():
+            self.log_info(f"Metric - {metric_name}: {value:.4f}") # Format value
+
+
+# Multimodal Integration Layer
+class MultimodalSystem:
+    """Integrates outputs from classical, quantum, and fractal models."""
+    def __init__(self, classical_model, quantum_model, fractal_model, logger=None):
+        """Initializes the integration system."""
+        self.classical_model = classical_model # Expects a model (e.g., PyTorch layer or function)
+        self.quantum_model = quantum_model # Expects QuantumNN instance
+        self.fractal_model = fractal_model # Expects FractalNN instance
+        self.logger = logger or Logger() # Use provided logger or create default
+
+        # --- Integration Weights ---
+        # These weights determine the contribution of each modality.
+        # They can be fixed, learned, or adapted dynamically.
+        self.weights = {
+            "classical": 0.4,
+            "quantum": 0.3,
+            "fractal": 0.3
+        }
+        self._normalize_weights() # Ensure they sum to 1
+
+        # --- Integration Modes ---
+        # Defines different strategies for combining the outputs.
+        self.integration_modes = [
+            "weighted_sum", # Simple weighted average
+            "concatenate",  # Concatenate feature vectors
+            "attention_fusion", # Attention mechanism for fusion
+            # Add more modes based on research/experimentation
+            # "crossmodal", "fractal_quantum", "adaptive_hybrid", etc.
+        ]
+        self.current_mode = "weighted_sum" # Default mode
+
+        # Parameters for specific modes (e.g., attention)
+        self.attention_dim = 64 # Example dimension for attention mechanism
+
+    def _normalize_weights(self):
+        """Ensure weights sum to 1."""
+        total = sum(self.weights.values())
+        if total > 0:
+            for key in self.weights:
+                self.weights[key] /= total
+        else:
+             # Default to equal weights if total is zero
+             num_modalities = len(self.weights)
+             for key in self.weights:
+                  self.weights[key] = 1.0 / num_modalities
+        self.logger.log_debug(f"Normalized integration weights: {self.weights}")
+
+    def set_weights(self, **new_weights):
+        """Update integration weights and normalize."""
+        for key, value in new_weights.items():
+            if key in self.weights:
+                self.weights[key] = value
+            else:
+                self.logger.log_warning(f"Ignoring unknown weight key: {key}")
+        self._normalize_weights()
+
+    def set_mode(self, mode):
+        """Set the integration mode."""
+        if mode in self.integration_modes:
+            self.current_mode = mode
+            self.logger.log_info(f"Integration mode set to: {mode}")
+        else:
+            self.logger.log_error(f"Invalid integration mode: {mode}. Available: {self.integration_modes}")
+            # Optionally raise an error: raise ValueError("Invalid integration mode")
+
+    def _resize_array(self, arr, target_len):
+        """Utility to resize numpy arrays using linear interpolation."""
+        if not isinstance(arr, np.ndarray): arr = np.array(arr) # Ensure numpy array
+        current_len = len(arr)
+
+        if current_len == target_len:
+            return arr
+        if current_len == 0: # Handle empty array
+             return np.zeros(target_len)
+
+        # Use np.interp for 1D interpolation
+        return np.interp(
+            np.linspace(0, 1, target_len), # Target indices (normalized)
+            np.linspace(0, 1, current_len), # Current indices (normalized)
+            arr
+        )
+
+    def integrate(self, classical_input, quantum_input_data, quantum_params, fractal_input_data):
+        """Integrates outputs from the three modalities based on the current mode.
+
+        Args:
+            classical_input: Input suitable for the classical model.
+            quantum_input_data: Classical data to be encoded for QuantumNN.variational_circuit.
+            quantum_params: Parameters (theta_values) for QuantumNN.variational_circuit.
+            fractal_input_data: Input data for the FractalNN processor.
+
+        Returns:
+            A combined feature vector representing the integrated output.
+        """
+        self.logger.log_debug("Starting multimodal integration...")
+
+        # --- 1. Get Outputs from Each Modality ---
+        # Classical Output
+        try:
+            # Assuming classical_model is a callable function or PyTorch module
+            if isinstance(self.classical_model, nn.Module):
+                 # Handle PyTorch model - ensure input is tensor, run inference
+                 self.classical_model.eval() # Set to evaluation mode
+                 with torch.no_grad():
+                      input_tensor = torch.tensor(classical_input, dtype=torch.float32)
+                      # Ensure tensor has batch dimension if needed by model
+                      if input_tensor.ndim == 1: input_tensor = input_tensor.unsqueeze(0)
+                      output_tensor = self.classical_model(input_tensor)
+                      classical_output = output_tensor.squeeze().detach().numpy()
+            else:
+                 # Assuming a simple function call
+                 classical_output = self.classical_model(classical_input)
+            classical_output = np.array(classical_output).flatten() # Ensure flat numpy array
+            self.logger.log_debug(f"Classical output shape: {classical_output.shape}")
+        except Exception as e:
+            self.logger.log_error(f"Error getting classical output: {e}", exc_info=True)
+            classical_output = np.array([]) # Empty array on error
+
+        # Quantum Output (using variational circuit as feature map)
+        try:
+            quantum_output = self.quantum_model.variational_circuit(quantum_input_data, quantum_params)
+            quantum_output = np.array(quantum_output).flatten()
+            self.logger.log_debug(f"Quantum output shape: {quantum_output.shape}")
+        except Exception as e:
+            self.logger.log_error(f"Error getting quantum output: {e}", exc_info=True)
+            quantum_output = np.array([])
+
+        # Fractal Output
+        try:
+            # Choose a fractal processing method (e.g., Mandelbrot or Julia)
+            fractal_output = self.fractal_model.process_data_mandelbrot(fractal_input_data)
+            fractal_output = np.array(fractal_output).flatten()
+            self.logger.log_debug(f"Fractal output shape: {fractal_output.shape}")
+        except Exception as e:
+            self.logger.log_error(f"Error getting fractal output: {e}", exc_info=True)
+            fractal_output = np.array([])
+
+        # --- 2. Combine Outputs Based on Mode ---
+        outputs = {
+            "classical": classical_output,
+            "quantum": quantum_output,
+            "fractal": fractal_output
+        }
+
+        # Handle potential empty outputs
+        non_empty_outputs = {k: v for k, v in outputs.items() if v.size > 0}
+        if not non_empty_outputs:
+             self.logger.log_error("All modalities failed to produce output. Returning empty array.")
+             return np.array([])
+
+        # Determine target length for resizing (e.g., max length or a fixed dimension)
+        # Option 1: Max length
+        # target_len = max(v.size for v in non_empty_outputs.values())
+        # Option 2: Fixed dimension (might be better for downstream tasks)
+        target_len = 128 # Example fixed dimension
+        self.logger.log_debug(f"Target integration length: {target_len}")
+
+        # Resize all available outputs
+        resized_outputs = {
+            k: self._resize_array(v, target_len) for k, v in non_empty_outputs.items()
+        }
+
+        # --- Integration Logic ---
+        integrated_result = np.zeros(target_len)
+
+        if self.current_mode == "weighted_sum":
+            for key, resized_vec in resized_outputs.items():
+                integrated_result += self.weights.get(key, 0) * resized_vec
+            self.logger.log_info("Integration completed using weighted_sum.")
+
+        elif self.current_mode == "concatenate":
+             # Concatenate available resized vectors
+             vectors_to_concat = [resized_outputs.get(key, np.zeros(target_len)) for key in self.weights.keys()]
+             integrated_result = np.concatenate(vectors_to_concat)
+             # Note: Output dimension will be target_len * num_modalities
+             self.logger.log_info(f"Integration completed using concatenate. Output shape: {integrated_result.shape}")
+             # Optional: Apply dimensionality reduction if fixed output size is needed
+             # integrated_result = self._reduce_dimension(integrated_result, target_len)
+
+        elif self.current_mode == "attention_fusion":
+             # --- Basic Attention Mechanism ---
+             # Requires defining Query, Key, Value projections (e.g., using nn.Linear)
+             # This is a simplified numpy version for demonstration.
+             # A full implementation would likely use PyTorch layers.
+
+             # Combine inputs into a sequence (modalities x features)
+             sequence = np.stack([resized_outputs.get(k, np.zeros(target_len)) for k in self.weights.keys()]) # Shape: (num_modalities, target_len)
+
+             # Simplified self-attention: Calculate pairwise similarity (dot product)
+             # Normally Q, K, V matrices would transform the sequence first
+             attention_scores = np.dot(sequence, sequence.T) # (num_modalities, num_modalities)
+             # Scale scores
+             attention_scores = attention_scores / np.sqrt(target_len)
+             # Apply softmax row-wise
+             attention_weights = np.exp(attention_scores - np.max(attention_scores, axis=1, keepdims=True)) # Stable softmax
+             attention_weights = attention_weights / np.sum(attention_weights, axis=1, keepdims=True)
+
+             # Weighted sum using attention weights (Value = sequence itself here)
+             attended_sequence = np.dot(attention_weights, sequence) # (num_modalities, target_len)
+
+             # Final fusion: Average or weighted average across attended modality representations
+             # Use original weights to combine the attended representations
+             weighted_attended_sum = np.zeros(target_len)
+             modalities = list(self.weights.keys())
+             for i, key in enumerate(modalities):
+                  weighted_attended_sum += self.weights[key] * attended_sequence[i]
+
+             integrated_result = weighted_attended_sum
+             self.logger.log_info("Integration completed using attention_fusion.")
+
+        else:
+            self.logger.log_error(f"Integration mode '{self.current_mode}' not fully implemented. Using weighted sum as fallback.")
+            for key, resized_vec in resized_outputs.items():
+                integrated_result += self.weights.get(key, 0) * resized_vec
+
+        # Normalize the final result (optional, depends on downstream use)
+        norm = np.linalg.norm(integrated_result)
+        if norm > 0:
+            integrated_result = integrated_result / norm
+
+        self.logger.log_debug(f"Final integrated output shape: {integrated_result.shape}")
+        return integrated_result
+
+    # Helper for concatenate mode if fixed output size is needed
+    # def _reduce_dimension(self, vector, target_dim):
+    #      """Reduces dimension using PCA."""
+    #      if vector.ndim == 1: vector = vector.reshape(1, -1) # PCA needs 2D input
+    #      if vector.shape[1] <= target_dim:
+    #           # Pad if already smaller (or return as is)
+    #           padded_vector = np.zeros((vector.shape[0], target_dim))
+    #           padded_vector[:, :vector.shape[1]] = vector
+    #           return padded_vector.flatten()
+    #      pca = PCA(n_components=target_dim)
+    #      reduced_vector = pca.fit_transform(vector)
+    #      return reduced_vector.flatten()
+
+
+# --- Placeholder Modules ---
+
+# Planning Module
+class PlanningModule:
+    """Employs planning algorithms (e.g., MCTS, rule-based) to determine actions."""
+    def __init__(self, logger=None):
+        self.logger = logger or Logger()
+        # TODO: Initialize planning algorithm parameters (e.g., MCTS exploration factor)
+
+    def plan_actions(self, current_state_representation, goal):
+        """Generate a sequence of actions based on the current state and goal.
+
+        Args:
+            current_state_representation: Vector or dict representing the current state.
+            goal: Description of the desired outcome.
+
+        Returns:
+            A list of planned actions (e.g., strings or structured action objects).
+        """
+        self.logger.log_info(f"Planning actions for goal: {goal}")
+        # TODO: Implement actual planning logic (MCTS, Bayesian Opt, rule-based, etc.)
+        # Ref: [1] Agivant, [4] Leewayhertz from original doc comments
+
+        # --- Example: Simple Rule-Based Planning ---
+        planned_actions = ["observe_environment"] # Default starting action
+
+        # Example rule: If state indicates an anomaly, diagnose it.
+        # This requires 'current_state_representation' to be interpretable or have specific features.
+        # Assuming it's a dictionary for this example:
+        if isinstance(current_state_representation, dict):
+            if current_state_representation.get('status_code', 0) > 3: # Example condition
+                planned_actions.append("diagnose_anomaly")
+                planned_actions.append("log_anomaly_report")
+
+        # Example rule: If goal involves optimization, run optimization.
+        if "optimize" in goal.lower():
+            planned_actions.append("run_optimization_routine")
+            planned_actions.append("report_optimization_results")
+        elif "analyze" in goal.lower():
+             planned_actions.append("perform_data_analysis")
+             planned_actions.append("generate_analysis_summary")
+
+        if len(planned_actions) == 1: # If only default action remains
+            planned_actions.append("default_exploratory_action")
+
+        self.logger.log_debug(f"Planned actions: {planned_actions}")
+        return planned_actions
+
+# Action Module
+class ActionModule:
+    """Converts planned actions into executable commands and executes them."""
+    def __init__(self, logger=None):
+        self.logger = logger or Logger()
+        # TODO: Initialize connections to actuators or APIs if needed
+
+    def execute_actions(self, actions):
+        """Execute a list of planned actions.
+
+        Args:
+            actions: A list of actions generated by the PlanningModule.
+
+        Returns:
+            A dictionary containing the results or status of each executed action.
+        """
+        self.logger.log_info(f"Executing actions: {actions}")
+        results = {}
+        for action in actions:
+            self.logger.log_debug(f"  - Executing action: {action}")
+            try:
+                # --- Simulate Action Execution ---
+                # TODO: Replace simulation with actual execution logic
+                # (e.g., API calls, robot commands, database updates)
+                # Ref: [1] Agivant HRP Lab from original doc comments
+
+                if action == "observe_environment":
+                    # Simulate observing - maybe return dummy sensor data
+                    action_result = {"status": "Success", "observation": {"temp": 25.5, "pressure": 101.3}}
+                elif action == "diagnose_anomaly":
+                    # Simulate diagnosis
+                    action_result = {"status": "Success", "diagnosis": "Sensor B reading high."}
+                elif action == "log_anomaly_report":
+                    # Simulate logging
+                    self.logger.log_warning("Anomaly detected and logged (simulated).")
+                    action_result = {"status": "Success", "log_id": "anomaly_123"}
+                elif action == "run_optimization_routine":
+                    # Simulate optimization
+                    action_result = {"status": "Success", "optimized_params": {"alpha": 0.1, "beta": 0.9}}
+                elif action == "report_optimization_results":
+                     action_result = {"status": "Success", "report_url": "/reports/opt_123.pdf"}
+                elif action == "perform_data_analysis":
+                     action_result = {"status": "Success", "analysis_summary": {"mean_sensor_A": 50.1}}
+                elif action == "generate_analysis_summary":
+                     action_result = {"status": "Success", "summary_ref": "analysis_abc"}
+                else:
+                    # Default simulation for unknown actions
+                    action_result = {"status": "Success", "message": f"Action '{action}' executed (simulated)."}
+
+                results[action] = action_result
+
+            except Exception as e:
+                self.logger.log_error(f"Error executing action '{action}': {e}", exc_info=True)
+                results[action] = {"status": "Failed", "error": str(e)}
+
+        self.logger.log_info("Action execution cycle completed.")
+        return results
+
+# Prototypical Memory Layer
+class PrototypicalMemory:
+    """Stores and retrieves compressed representations (prototypes) of experiences."""
+    def __init__(self, capacity=1000, logger=None):
+        """Initializes the memory buffer."""
+        self.logger = logger or Logger()
+        self.capacity = capacity
+        self.experience_buffer = [] # Simple list to store experiences
+        # Future: Use more sophisticated storage (e.g., vector database for similarity search)
+        self.logger.log_info(f"Prototypical Memory initialized with capacity {capacity}.")
+
+    def store_experience(self, experience):
+        """Stores a new experience, potentially replacing old ones if capacity is reached.
+
+        Args:
+            experience (dict): A dictionary containing details of an interaction cycle,
+                               e.g., {"state": ..., "goal": ..., "actions": ..., "result": ..., "representation": ...}
+        """
+        if not isinstance(experience, dict):
+            self.logger.log_warning("Attempted to store non-dict experience. Skipping.")
+            return
+
+        if len(self.experience_buffer) >= self.capacity:
+            # Simple FIFO replacement strategy
+            removed_experience = self.experience_buffer.pop(0)
+            self.logger.log_debug(f"Memory capacity reached. Removed oldest experience (Goal: {removed_experience.get('goal', 'N/A')}).")
+
+        self.experience_buffer.append(experience)
+        self.logger.log_info(f"Stored new experience. Memory size: {len(self.experience_buffer)}")
+        self.logger.log_debug(f"Stored experience details: Goal='{experience.get('goal', 'N/A')}', Actions={experience.get('actions', [])}")
+
+        # TODO: Implement prototype generation/update logic here.
+        # This could involve clustering experiences, finding centroids (prototypes),
+        # or using techniques from Proto-LMs.
+        # Ref: [6] proto-lm, [8] arXiv:2410.08925v3 from original doc comments
+        self._update_prototypes(experience) # Placeholder call
+
+    def _update_prototypes(self, new_experience):
+        """Placeholder for updating prototypes based on new experiences."""
+        # This is where clustering or other prototype extraction methods would go.
+        # For now, it does nothing.
+        pass
+
+    def retrieve_prototype(self, query_goal=None, query_state_representation=None, k=1):
+        """Retrieves the most relevant prototype(s) based on the query.
+
+        Args:
+            query_goal (str, optional): The goal to match.
+            query_state_representation (np.array, optional): State representation for similarity search.
+            k (int): Number of prototypes to retrieve.
+
+        Returns:
+            A list containing the k most relevant stored experiences (or fewer if not enough match).
+            Returns an empty list if no relevant experiences are found.
+        """
+        if not self.experience_buffer:
+            self.logger.log_warning("Attempted to retrieve from empty memory.")
+            return []
+
+        relevant_experiences = []
+
+        # --- Strategy 1: Exact Goal Matching (Simple) ---
+        if query_goal:
+            self.logger.log_debug(f"Retrieving prototypes matching goal: '{query_goal}'")
+            relevant_experiences = [exp for exp in self.experience_buffer if exp.get('goal') == query_goal]
+            self.logger.log_info(f"Found {len(relevant_experiences)} experiences matching goal.")
+
+        # --- Strategy 2: Similarity Search (Requires representations) ---
+        elif query_state_representation is not None:
+            self.logger.log_debug("Retrieving prototypes based on state similarity.")
+            query_rep = np.array(query_state_representation).flatten()
+            # Extract representations from stored experiences (assuming they exist)
+            stored_reps = [np.array(exp.get('representation', [])).flatten() for exp in self.experience_buffer]
+
+            # Filter out experiences without valid representations
+            valid_indices = [i for i, rep in enumerate(stored_reps) if rep.size == query_rep.size]
+            if not valid_indices:
+                 self.logger.log_warning("No stored experiences with matching representation dimensions found.")
+                 return []
+
+            valid_stored_reps = np.array([stored_reps[i] for i in valid_indices])
+            valid_experiences = [self.experience_buffer[i] for i in valid_indices]
+
+            # Calculate distances (e.g., Euclidean or Cosine)
+            # Using Euclidean distance here
+            distances = pairwise_distances(query_rep.reshape(1, -1), valid_stored_reps).flatten()
+
+            # Get indices of the k nearest neighbors
+            nearest_indices = np.argsort(distances)[:k]
+            relevant_experiences = [valid_experiences[i] for i in nearest_indices]
+            self.logger.log_info(f"Found {len(relevant_experiences)} experiences based on state similarity.")
+
+        # --- Fallback: Return most recent if no other criteria match ---
+        if not relevant_experiences and k > 0:
+            self.logger.log_debug("No specific match found. Returning most recent experiences.")
+            relevant_experiences = self.experience_buffer[-k:]
+
+        # Return the top k matches found
+        return relevant_experiences[:k]
+
+
+# Main Framework Class
+class HyperIntelligentFramework:
+    """Integrates modules based on the Hyperintelligent Framework concept."""
+    def __init__(self, config=None):
+        """Initializes the framework and its components."""
+        self.config = config or {} # Load configuration if provided
+        self.logger = Logger(log_file=self.config.get("log_file", "framework.log"))
+        self.logger.log_info("Initializing HyperIntelligentFramework...")
+
+        # --- Initialize Core Modules ---
+        self.profiling_module = DataProcessor()
+        self.planning_module = PlanningModule(logger=self.logger)
+        self.action_module = ActionModule(logger=self.logger)
+        self.prototypical_memory = PrototypicalMemory(
+             capacity=self.config.get("memory_capacity", 1000), logger=self.logger
+        )
+        self.ml_engine = MLEngine() # For classical ML tasks
+        self.api_client = APIClient() # For external interactions
+
+        # --- Initialize Models for Multimodal Integration ---
+        # These should be configurable based on the task/domain
+        # Example configuration:
+        classical_input_dim = self.config.get("classical_model_input_dim", 128)
+        classical_output_dim = self.config.get("classical_model_output_dim", 64)
+        num_qubits = self.config.get("num_qubits", 4)
+        fractal_iterations = self.config.get("fractal_iterations", 50)
+
+        # Define a simple classical model (can be replaced with a trained one)
+        self.classical_model_instance = nn.Sequential(
+             nn.Linear(classical_input_dim, classical_output_dim),
+             nn.ReLU(),
+             # Add more layers if needed
+        )
+        # Load pre-trained weights if available
+        # model_path = self.config.get("classical_model_path")
+        # if model_path and os.path.exists(model_path):
+        #     self.classical_model_instance.load_state_dict(torch.load(model_path))
+        #     self.logger.log_info(f"Loaded classical model weights from {model_path}")
+
+        self.quantum_model_instance = QuantumNN(num_qubits=num_qubits)
+        self.fractal_model_instance = FractalNN(iterations=fractal_iterations)
+
+        # Initialize the Multimodal System with the models
+        self.multimodal_system = MultimodalSystem(
+            classical_model=self.classical_model_instance,
+            quantum_model=self.quantum_model_instance,
+            fractal_model=self.fractal_model_instance,
+            logger=self.logger
+        )
+
+        # Set initial multimodal integration mode (can be changed later)
+        self.multimodal_system.set_mode(self.config.get("integration_mode", "weighted_sum"))
+
+        self.logger.log_info("HyperIntelligentFramework initialized successfully.")
+
+    def perceive_and_profile(self, raw_input):
+        """Processes raw multimodal input into a usable state representation.
+
+        Args:
+            raw_input: Can be various types (DataFrame, text, image features, etc.).
+
+        Returns:
+            A dictionary or vector representing the current perceived state.
+        """
+        self.logger.log_info(f"Perceiving input of type: {type(raw_input)}")
+        # TODO: Implement sophisticated multimodal input processing.
+        # This might involve different paths based on input type, using
+        # transformer encoders, feature extractors, etc.
+        # Ref: [3] SmythOS, [9] IBM Research (Transformers) from doc
+
+        # --- Example: Handling Pandas DataFrame Input ---
+        if isinstance(raw_input, pd.DataFrame):
+            try:
+                # Basic processing: clean, transform, analyze
+                cleaned_data = self.profiling_module.clean_data(raw_input)
+                # Transform only numeric columns
+                numeric_cols = cleaned_data.select_dtypes(include=np.number).columns
+                transformed_data = self.profiling_module.transform_data(cleaned_data[numeric_cols])
+
+                # Create state representation (example: dictionary of means/stats)
+                state_representation = {}
+                if not transformed_data.empty:
+                     state_representation = transformed_data.mean().to_dict()
+                # Add stats from non-numeric columns if needed
+                # state_representation.update(cleaned_data.describe(exclude=np.number).to_dict())
+                self.logger.log_debug(f"DataFrame profiled. State representation keys: {list(state_representation.keys())}")
+                return state_representation
+            except Exception as e:
+                self.logger.log_error(f"Error profiling DataFrame input: {e}", exc_info=True)
+                return {"error": "DataFrame profiling failed"} # Return error state
+
+        # --- Example: Handling Text Input (Placeholder) ---
+        elif isinstance(raw_input, str):
+            self.logger.log_debug("Processing text input (placeholder)...")
+            # TODO: Use NLP models (e.g., sentence transformers) for text representation
+            # Example: return simple word count
+            return {"text_length": len(raw_input.split())}
+
+        # --- Handle other types or return error ---
+        else:
+            self.logger.log_warning(f"Unhandled input type: {type(raw_input)}. Returning raw input.")
+            # It might be better to return an error state or None
+            return {"error": f"Unhandled input type: {type(raw_input)}"}
+
+    def _prepare_multimodal_inputs(self, state_representation):
+        """Prepares the specific inputs needed by each model in MultimodalSystem.
+
+        Args:
+            state_representation: The output from perceive_and_profile.
+
+        Returns:
+            A tuple: (classical_input, quantum_input_data, quantum_params, fractal_input_data)
+        """
+        # This function is CRITICAL and needs careful design based on the state
+        # representation and the requirements of the classical, quantum, and fractal models.
+
+        # --- Example Implementation (Highly Simplified) ---
+        # Assume state_representation is a dictionary of numerical values
+        state_values = np.array(list(state_representation.values())) if isinstance(state_representation, dict) else np.array(state_representation)
+        state_values = state_values[np.isfinite(state_values)] # Remove NaN/inf
+
+        if state_values.size == 0:
+             # Handle empty state after cleaning
+             state_values = np.zeros(1) # Default to single zero if empty
+
+        # 1. Classical Input: Pad/truncate state values to match model input dim
+        target_classical_dim = self.classical_model_instance[0].in_features # Get from model
+        classical_input = self._resize_array(state_values, target_classical_dim)
+
+        # 2. Quantum Input Data: Use (part of) the state values for encoding
+        #    Needs to match the encoding strategy in QuantumNN.variational_circuit
+        quantum_input_data = self._resize_array(state_values, self.quantum_model_instance.num_qubits * 2) # Example size based on angle encoding used
+
+        # 3. Quantum Parameters: These are the *trainable* parameters for the VQC.
+        #    In a real application, these would come from an optimization loop (e.g., training).
+        #    Here, we use fixed placeholder values.
+        num_q_params = len(self.quantum_model_instance.params)
+        quantum_params = np.random.rand(num_q_params) * np.pi # Random angles as placeholder
+
+        # 4. Fractal Input Data: Use (part of) the state values
+        fractal_input_data = state_values # Use raw state values (or a subset)
+
+        self.logger.log_debug("Prepared inputs for multimodal integration.")
+        return classical_input, quantum_input_data, quantum_params, fractal_input_data
+
+
+    def reason_plan_act(self, current_state, goal):
+        """Core cognitive loop: reason, plan, store experience, act."""
+        self.logger.log_info(f"--- Starting Reason/Plan/Act Cycle for Goal: '{goal}' ---")
+        try:
+            # --- 1. Reasoning & Context Building ---
+            self.logger.log_debug("Step 1: Reasoning...")
+            # Retrieve relevant past experiences (prototypes)
+            # Use current state representation for similarity search if available
+            state_rep_for_memory = current_state.get("representation", list(current_state.values()) if isinstance(current_state, dict) else current_state) # Example: extract representation
+            relevant_prototypes = self.prototypical_memory.retrieve_prototype(
+                query_goal=goal, # Try matching goal first
+                query_state_representation=state_rep_for_memory if isinstance(state_rep_for_memory, (list, np.ndarray)) else None, # Use state if available
+                k=1
+            )
+            if relevant_prototypes:
+                self.logger.log_info(f"Retrieved relevant prototype experience (Goal: {relevant_prototypes[0].get('goal')})")
+                # TODO: Use prototype to influence reasoning/planning (e.g., bias planning, adapt weights)
+                # Example: Slightly adapt multimodal weights based on prototype success?
+
+            # Prepare inputs for the multimodal system
+            classical_in, quantum_data_in, quantum_params_in, fractal_in = self._prepare_multimodal_inputs(current_state)
+
+            # Perform multimodal integration
+            integrated_representation = self.multimodal_system.integrate(
+                classical_in, quantum_data_in, quantum_params_in, fractal_in
+            )
+            self.logger.log_info("Multimodal reasoning/integration successful.")
+            # This integrated representation forms the core context for planning
+            reasoning_context = integrated_representation
+
+            # --- 2. Planning ---
+            self.logger.log_debug("Step 2: Planning...")
+            planned_actions = self.planning_module.plan_actions(reasoning_context, goal)
+            self.logger.log_info(f"Planned actions: {planned_actions}")
+
+            # --- 3. Action Execution ---
+            self.logger.log_debug("Step 4: Action Execution...") # Log before execution
+            action_results = self.action_module.execute_actions(planned_actions)
+            self.logger.log_info(f"Action execution results: {action_results}")
+
+            # --- 4. Store Experience ---
+            self.logger.log_debug("Step 3: Storing Experience...") # Log before storing
+            experience = {
+                "state": current_state, # State before action
+                "goal": goal,
+                "reasoning_context": reasoning_context.tolist(), # Store the integrated rep
+                "planned_actions": planned_actions,
+                "action_results": action_results,
+                "representation": reasoning_context.tolist() # Use integrated rep for future similarity checks
+                # Add timestamp, success metric, etc.
+            }
+            self.prototypical_memory.store_experience(experience)
+
+            self.logger.log_info("--- Reason/Plan/Act Cycle Completed ---")
+            return action_results # Return results of actions
+
+        except Exception as e:
+            self.logger.log_error(f"Error during reason/plan/act cycle: {e}", exc_info=True)
+            # raise # Option to re-raise the exception
+            return {"error": f"Cycle failed: {e}"} # Return error status
+
+
+    # --- Other Methods (e.g., Training, External Data Fetching) ---
+
+    def train_classical_model(self, X, y, model_type="random_forest"):
+        """Utility to train a classical ML model using the MLEngine."""
+        # This would typically be called offline or as part of a specific learning phase
+        self.logger.log_info(f"Initiating classical model training (type: {model_type})...")
+        try:
+            model, accuracy = self.ml_engine.train_model(X, y, model_type=model_type)
+            if model and model_type != "neural_network": # Only log accuracy if training happened
+                self.logger.log_info(f"Classical model training completed. Accuracy: {accuracy:.4f}")
+                # TODO: Save the trained model (e.g., using joblib or torch.save)
+                # TODO: Potentially update self.classical_model_instance if applicable
+            elif model_type == "neural_network":
+                 self.logger.log_info("Neural network model defined but requires separate training loop.")
+            else:
+                 self.logger.log_error("Classical model training failed.")
+            return model, accuracy
+        except Exception as e:
+            self.logger.log_error(f"Error during classical model training: {e}", exc_info=True)
+            return None, 0.0
+
+    def fetch_external_data(self, url, params=None, headers=None):
+        """Utility to fetch data using the APIClient."""
+        self.logger.log_info(f"Fetching external data from: {url}")
+        try:
+            data = self.api_client.fetch_data(url, params=params, headers=headers)
+            if data:
+                self.logger.log_info("External data fetched successfully.")
+            else:
+                self.logger.log_warning("Failed to fetch external data (check logs for details).")
+            return data
+        except Exception as e:
+            self.logger.log_error(f"Error fetching external data: {e}", exc_info=True)
+            return None
+
+# --- Main Execution Example ---
+def main():
+    """Example usage of the HyperIntelligentFramework."""
+    framework = HyperIntelligentFramework(config={"log_file": "framework_run.log"})
+    print("HyperIntelligent Framework initialized via main.")
+    framework.logger.log_info("--- Starting New Framework Run ---")
+
+    # Simulate receiving some input data (e.g., sensor readings)
+    example_raw_input = pd.DataFrame({
+        'sensor_A': np.random.rand(10) * 100,
+        'sensor_B': np.random.rand(10) * 50 + 20,
+        'status_code': np.random.randint(0, 5, size=10),
+        'category': np.random.choice(['X', 'Y', 'Z'], size=10) # Added categorical data
+    })
+    framework.logger.log_debug(f"Simulated raw input:\n{example_raw_input.head()}")
+
+    # Define a goal for the agent
+    goal = "optimize system performance based on sensor readings and status"
+
+    try:
+        # 1. Perceive the environment
+        current_state = framework.perceive_and_profile(example_raw_input)
+        print(f"\nPerceived State (Summary): { {k: f'{v:.2f}' if isinstance(v, float) else v for k, v in current_state.items()} }") # Print formatted state
+        framework.logger.log_info(f"Perceived State: {current_state}")
+
+        # Check if perception failed
+        if isinstance(current_state, dict) and "error" in current_state:
+             raise Exception(f"Perception failed: {current_state['error']}")
+
+        # 2. Execute the main cognitive cycle
+        print(f"\nExecuting Reason/Plan/Act cycle for goal: '{goal}'")
+        results = framework.reason_plan_act(current_state, goal)
+        print(f"\nCycle completed. Action Results: {results}")
+
+        # 3. Example: Retrieve memory after the cycle
+        print("\n--- Retrieving Memory ---")
+        retrieved = framework.prototypical_memory.retrieve_prototype(query_goal=goal, k=1)
+        if retrieved:
+             print(f"Retrieved experience for goal '{goal}':")
+             # print(f"  - State Keys: {list(retrieved[0].get('state', {}).keys())}") # Avoid printing large states
+             print(f"  - Planned Actions: {retrieved[0].get('planned_actions')}")
+             print(f"  - Action Results: {retrieved[0].get('action_results')}")
+        else:
+             print(f"No specific experience found for goal '{goal}' in memory yet.")
+
+        # 4. Example: Simulate another cycle with a different goal
+        goal_2 = "analyze sensor_A trends"
+        print(f"\nExecuting Reason/Plan/Act cycle for goal: '{goal_2}'")
+        # Assume state hasn't changed much for this example
+        results_2 = framework.reason_plan_act(current_state, goal_2)
+        print(f"\nCycle completed. Action Results: {results_2}")
+
+
+    except Exception as e:
+        print(f"\nAn error occurred during the example run: {e}")
+        framework.logger.log_error(f"Main execution failed: {e}", exc_info=True)
+
+    framework.logger.log_info("--- Framework Run Finished ---")
+
+if __name__ == "__main__":
+    main()
